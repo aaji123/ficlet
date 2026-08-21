@@ -1,2 +1,0 @@
-import PlaceholderPage from "@/components/PlaceholderPage";
-export default function Page() { return <PlaceholderPage title="Dashboard" description="Your saved Ficlets, credits, and account settings." />; }

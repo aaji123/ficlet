@@ -1,2 +1,0 @@
-import PlaceholderPage from "@/components/PlaceholderPage";
-export default function Page() { return <PlaceholderPage title="Pricing" description="Free generation, $5/mo Dreamer Pass, and $3 credit packs." />; }
