@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
 type GenerateInput = {
   vibe: string;
@@ -31,13 +35,19 @@ Content rules:
 - Use original fictional characters and settings inspired by the requested tropes.
 `.trim();
 
-function getHeaders(apiKey: string) {
+function getOpenRouterHeaders(apiKey: string) {
   return {
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
     "HTTP-Referer": "http://localhost:3000",
     "X-Title": "Ficlet",
   };
+}
+
+function getSupabaseUserClient(accessToken: string) {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
 }
 
 function extractJson(raw: string) {
@@ -50,7 +60,6 @@ function extractJson(raw: string) {
   }
 }
 
-// Step 1: plan the scene (non-streaming)
 async function generateOutline(
   apiKey: string,
   model: string,
@@ -98,7 +107,7 @@ Plan the scene and return only the JSON.
 
   const response = await fetch(OPENROUTER_URL, {
     method: "POST",
-    headers: getHeaders(apiKey),
+    headers: getOpenRouterHeaders(apiKey),
     body: JSON.stringify({
       model,
       messages: [
@@ -110,16 +119,11 @@ Plan the scene and return only the JSON.
     }),
   });
 
-  if (!response.ok) {
-    throw new Error("Outline generation failed");
-  }
+  if (!response.ok) throw new Error("Outline generation failed");
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
-
-  if (!content) {
-    throw new Error("No outline returned");
-  }
+  if (!content) throw new Error("No outline returned");
 
   const parsed = extractJson(content);
 
@@ -147,7 +151,6 @@ Plan the scene and return only the JSON.
     };
   }
 
-  // Fallback if JSON parsing failed
   return {
     title: "Untitled Ficlet",
     premise: "",
@@ -175,14 +178,57 @@ export async function POST(request: Request) {
     );
   }
 
+  // ---- Auth ----
+  const authHeader = request.headers.get("authorization") || "";
+  const accessToken = authHeader.replace("Bearer ", "");
+  if (!accessToken) {
+    return NextResponse.json({ error: "Please log in to generate." }, { status: 401 });
+  }
+
+  const supabase = getSupabaseUserClient(accessToken);
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "Please log in to generate." }, { status: 401 });
+  }
+
+  // ---- Profile / gate ----
+  let { data: profile } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  if (!profile) {
+    const { data: created } = await supabase
+      .from("profiles")
+      .insert({ id: user.id, email: user.email })
+      .select()
+      .single();
+    profile = created;
+  }
+
+  if (!profile) {
+    return NextResponse.json(
+      { error: "Could not load your profile. Please try again." },
+      { status: 500 }
+    );
+  }
+
+  // Phase 4: only the free generation. Credits + subscription come in Phase 5.
+  const canGenerateFree = profile.free_generation_used === false;
+  if (!canGenerateFree) {
+    return NextResponse.json({ paywall: true });
+  }
+
+  // ---- Parse input ----
   let input: GenerateInput;
   try {
     input = await request.json();
   } catch {
-    return NextResponse.json(
-      { error: "Invalid request." },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Invalid request." }, { status: 400 });
   }
 
   if (!input.tropes || input.tropes.length === 0) {
@@ -204,7 +250,6 @@ export async function POST(request: Request) {
     );
   }
 
-  // If blocked, return normal JSON (not a stream)
   if (outline.blocked) {
     return NextResponse.json({
       blocked: true,
@@ -213,6 +258,12 @@ export async function POST(request: Request) {
         "Ficlet can't generate that type of content. Try a fictional fantasy romance scenario instead.",
     });
   }
+
+  // ---- Mark the free generation as used (point of no return) ----
+  await supabase
+    .from("profiles")
+    .update({ free_generation_used: true })
+    .eq("id", user.id);
 
   // ---- Step 2: stream the prose ----
   const encoder = new TextEncoder();
@@ -263,17 +314,12 @@ Now write the scene prose only.
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        // Send meta first so the client can show title/premise immediately
-        const meta = {
-          type: "meta",
-          title: outline.title,
-          premise: outline.premise,
-        };
+        const meta = { type: "meta", title: outline.title, premise: outline.premise };
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(meta)}\n\n`));
 
         const response = await fetch(OPENROUTER_URL, {
           method: "POST",
-          headers: getHeaders(apiKey),
+          headers: getOpenRouterHeaders(apiKey),
           body: JSON.stringify({
             model,
             stream: true,
@@ -282,7 +328,7 @@ Now write the scene prose only.
               { role: "user", content: proseUserPrompt },
             ],
             temperature: 0.8,
-            max_tokens: 2500,
+            max_tokens: 4000,
           }),
         });
 
@@ -291,9 +337,7 @@ Now write the scene prose only.
             type: "error",
             message: "The AI provider returned an error while writing.",
           };
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(errEvent)}\n\n`)
-          );
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(errEvent)}\n\n`));
           controller.close();
           return;
         }
@@ -313,7 +357,6 @@ Now write the scene prose only.
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed.startsWith("data:")) continue;
-
             const data = trimmed.slice(5).trim();
             if (data === "[DONE]") continue;
 

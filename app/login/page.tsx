@@ -1,16 +1,36 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
-export default function LoginPage() {
+function LoginForm() {
+  const searchParams = useSearchParams();
+  const redirect = searchParams.get("redirect") || "/generate";
+
   const [email, setEmail] = useState("");
-  const [submitted, setSubmitted] = useState(false);
+  const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState("");
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Phase 4 — connect Supabase magic link here
-    setSubmitted(true);
+    setStatus("sending");
+    setErrorMsg("");
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: `${window.location.origin}/auth/callback?redirect=${encodeURIComponent(redirect)}`,
+      },
+    });
+
+    if (error) {
+      setStatus("error");
+      setErrorMsg(error.message);
+    } else {
+      setStatus("sent");
+    }
   };
 
   return (
@@ -25,23 +45,19 @@ export default function LoginPage() {
       </header>
 
       <div className="mx-auto max-w-lg px-6 py-16">
-        <h1 className="text-3xl font-bold">Welcome back</h1>
+        <h1 className="text-3xl font-bold">Welcome</h1>
         <p className="mt-2 text-neutral-400">
           Log in with your email. No password needed.
         </p>
 
-        {submitted ? (
+        {status === "sent" ? (
           <div className="mt-8 rounded-xl border border-purple-900/40 bg-purple-950/20 p-6">
             <p className="text-purple-200">
-              Login is almost ready. In the meantime, you can generate a free
-              Ficlet right now.
+              Check your email! We sent you a magic link. Click it to sign in.
             </p>
-            <Link
-              href="/generate"
-              className="mt-4 inline-block rounded-xl bg-purple-600 px-5 py-3 font-semibold text-white transition hover:bg-purple-500"
-            >
-              Generate my free Ficlet
-            </Link>
+            <p className="mt-2 text-sm text-neutral-400">
+              (If you don&apos;t see it, check your spam folder.)
+            </p>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="mt-8 space-y-4">
@@ -59,11 +75,18 @@ export default function LoginPage() {
               />
             </div>
 
+            {status === "error" && errorMsg && (
+              <div className="rounded-lg border border-red-900 bg-red-950/30 p-3 text-sm text-red-300">
+                {errorMsg}
+              </div>
+            )}
+
             <button
               type="submit"
-              className="w-full rounded-xl bg-purple-600 px-6 py-4 font-semibold text-white transition-all hover:bg-purple-500 active:scale-95"
+              disabled={status === "sending"}
+              className="w-full rounded-xl bg-purple-600 px-6 py-4 font-semibold text-white transition-all hover:bg-purple-500 active:scale-95 disabled:opacity-50"
             >
-              Send magic link
+              {status === "sending" ? "Sending…" : "Send magic link"}
             </button>
 
             <p className="text-center text-xs text-neutral-500">
@@ -73,5 +96,13 @@ export default function LoginPage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-neutral-950" />}>
+      <LoginForm />
+    </Suspense>
   );
 }
