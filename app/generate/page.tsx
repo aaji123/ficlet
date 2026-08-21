@@ -85,7 +85,7 @@ export default function GeneratePage() {
     const { error } = await supabase.auth.signInWithOtp({
       email: gateEmail,
       options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback?redirect=/generate`,
+        emailRedirectTo: `${window.location.origin}/auth/callback?next=/generate`,
       },
     });
 
