@@ -2,15 +2,13 @@
 
 import { useState } from "react";
 
-type FicletResult = {
-  title: string;
-  premise: string;
-  story: string;
-};
+type Phase = "form" | "planning" | "streaming" | "done";
 
 export default function GeneratePage() {
-  const [isLoading, setIsLoading] = useState(false);
-  const [result, setResult] = useState<FicletResult | null>(null);
+  const [phase, setPhase] = useState<Phase>("form");
+  const [title, setTitle] = useState("");
+  const [premise, setPremise] = useState("");
+  const [chunks, setChunks] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const [vibe, setVibe] = useState("Dark Romance");
@@ -39,6 +37,14 @@ export default function GeneratePage() {
     );
   };
 
+  const resetAll = () => {
+    setPhase("form");
+    setTitle("");
+    setPremise("");
+    setChunks([]);
+    setError(null);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -47,15 +53,16 @@ export default function GeneratePage() {
       return;
     }
 
-    setIsLoading(true);
     setError(null);
+    setTitle("");
+    setPremise("");
+    setChunks([]);
+    setPhase("planning");
 
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           vibe,
           tropes,
@@ -66,63 +73,133 @@ export default function GeneratePage() {
         }),
       });
 
-      const data = await response.json();
+      const contentType = response.headers.get("content-type") || "";
 
-      if (!response.ok) {
-        throw new Error(data.error || "Generation failed.");
+      // Non-streaming JSON response means blocked or error
+      if (contentType.includes("application/json")) {
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Generation failed.");
+        }
+        if (data.blocked) {
+          throw new Error(data.message || "That content can't be generated.");
+        }
+        throw new Error("Unexpected response.");
       }
 
-      if (data.blocked) {
-        throw new Error(data.message || "Content blocked.");
+      // Streaming response
+      if (!response.ok || !response.body) {
+        throw new Error("Generation failed.");
       }
 
-      setResult(data);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+
+        for (const event of events) {
+          const trimmed = event.trim();
+          if (!trimmed.startsWith("data:")) continue;
+
+          const dataStr = trimmed.slice(5).trim();
+          if (!dataStr) continue;
+
+          try {
+            const parsed = JSON.parse(dataStr);
+
+            if (parsed.type === "meta") {
+              setTitle(parsed.title || "");
+              setPremise(parsed.premise || "");
+              setPhase("streaming");
+            } else if (parsed.type === "text") {
+              setChunks((prev) => [...prev, parsed.content]);
+            } else if (parsed.type === "done") {
+              setPhase("done");
+            } else if (parsed.type === "error") {
+              throw new Error(parsed.message || "Stream error.");
+            }
+          } catch (err: any) {
+            if (err instanceof SyntaxError) {
+              // ignore malformed JSON chunks
+            } else {
+              throw err;
+            }
+          }
+        }
+      }
+
+      setPhase("done");
     } catch (err: any) {
       setError(err.message || "Something went wrong.");
-    } finally {
-      setIsLoading(false);
+      setPhase("form");
     }
   };
 
-  if (result) {
+  // ---------- RESULT VIEW ----------
+  if (phase === "planning" || phase === "streaming" || phase === "done") {
     return (
       <main className="min-h-screen bg-neutral-950 pb-20">
         <header className="sticky top-0 z-10 border-b border-neutral-800 bg-neutral-950/80 px-6 py-4 backdrop-blur-md">
           <div className="mx-auto flex max-w-2xl items-center justify-between">
-            <button
-              onClick={() => setResult(null)}
-              className="font-semibold text-purple-400"
-            >
+            <button onClick={resetAll} className="font-semibold text-purple-400">
               ← New Ficlet
             </button>
-            <span className="text-sm text-neutral-500">Your result</span>
+            <span className="text-sm text-neutral-500">
+              {phase === "planning" ? "Planning…" : "Your Ficlet"}
+            </span>
           </div>
         </header>
 
         <div className="mx-auto max-w-2xl px-6 py-10">
-          <h1 className="text-3xl font-bold">{result.title}</h1>
+          {phase === "planning" ? (
+            <div className="flex flex-col items-center justify-center py-24 text-center">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-purple-500 border-t-transparent" />
+              <p className="mt-6 text-neutral-400">Planning your story…</p>
+            </div>
+          ) : (
+            <>
+              {title && (
+                <h1 className="ficlet-fade text-3xl font-bold">{title}</h1>
+              )}
 
-          {result.premise && (
-            <p className="mt-4 rounded-xl border border-purple-900/40 bg-purple-950/20 p-4 text-purple-200">
-              {result.premise}
-            </p>
+              {premise && (
+                <p className="ficlet-fade mt-4 rounded-xl border border-purple-900/40 bg-purple-950/20 p-4 text-purple-200">
+                  {premise}
+                </p>
+              )}
+
+              <div className="mt-8 whitespace-pre-wrap leading-relaxed text-neutral-200">
+                {chunks.map((chunk, i) => (
+                  <span key={i} className="ficlet-fade">
+                    {chunk}
+                  </span>
+                ))}
+              </div>
+
+              {phase === "done" && (
+                <button
+                  onClick={resetAll}
+                  className="mt-10 w-full rounded-xl bg-purple-600 px-6 py-4 text-lg font-semibold text-white transition-all hover:bg-purple-500 active:scale-95"
+                >
+                  Create another Ficlet
+                </button>
+              )}
+            </>
           )}
-
-          <div className="mt-8 whitespace-pre-wrap leading-relaxed text-neutral-200">
-            {result.story}
-          </div>
-
-          <button
-            onClick={() => setResult(null)}
-            className="mt-10 w-full rounded-xl bg-purple-600 px-6 py-4 text-lg font-semibold text-white transition-all hover:bg-purple-500 active:scale-95"
-          >
-            Create another Ficlet
-          </button>
         </div>
       </main>
     );
   }
 
+  // ---------- FORM VIEW ----------
   return (
     <main className="min-h-screen bg-neutral-950 pb-20">
       <header className="sticky top-0 z-10 border-b border-neutral-800 bg-neutral-950/80 px-6 py-4 backdrop-blur-md">
@@ -251,10 +328,10 @@ export default function GeneratePage() {
 
         <button
           type="submit"
-          disabled={isLoading || tropes.length === 0}
+          disabled={tropes.length === 0}
           className="w-full rounded-xl bg-purple-600 px-6 py-4 text-lg font-semibold text-white shadow-lg shadow-purple-900/30 transition-all hover:bg-purple-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isLoading ? "Dreaming up your story..." : "Generate my free Ficlet"}
+          Generate my free Ficlet
         </button>
 
         {tropes.length === 0 && (
