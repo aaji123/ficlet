@@ -266,6 +266,7 @@ export async function POST(request: Request) {
     .eq("id", user.id);
 
   // ---- Step 2: stream the prose ----
+  let fullStoryText = "";
   const encoder = new TextEncoder();
 
   const proseSystemPrompt = `
@@ -364,6 +365,7 @@ Now write the scene prose only.
               const parsed = JSON.parse(data);
               const delta = parsed?.choices?.[0]?.delta?.content;
               if (delta) {
+                fullStoryText += delta;
                 const textEvent = { type: "text", content: delta };
                 controller.enqueue(
                   encoder.encode(`data: ${JSON.stringify(textEvent)}\n\n`)
@@ -373,6 +375,18 @@ Now write the scene prose only.
               // ignore malformed chunks
             }
           }
+        }
+
+        try {
+          await supabase.from("generations").insert({
+            user_id: user.id,
+            title: outline.title,
+            premise: outline.premise,
+            story: fullStoryText,
+            input_json: input, // Save the tropes/vibes they chose
+          });
+        } catch (dbError) {
+          console.error("Failed to save generation to DB:", dbError);
         }
 
         const doneEvent = { type: "done" };
